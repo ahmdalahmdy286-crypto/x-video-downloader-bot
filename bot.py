@@ -1,96 +1,101 @@
 import os
 import yt_dlp
+import asyncio
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
-from telegram.ext import ApplicationBuilder, CommandHandler, MessageHandler, CallbackQueryHandler, filters, ContextTypes
+from telegram.ext import Application, CommandHandler, MessageHandler, CallbackQueryHandler, ContextTypes, filters
 
-TOKEN = "8601799589:AAGHky10R-1PwO6iPymp5pdZNQVoQtaLotg"
-user_links = {} # نخزن الرابط مؤقتا
+BOT_TOKEN = os.getenv("BOT_TOKEN")
 
+# رسالة البداية الاحترافية
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    await update.message.reply_text("🎬 ارسل لي رابط تغريدة X فيها فيديو")
+    text = f"""✅ أهلاً بك عزي: {update.effective_user.first_name} VIP
 
-async def get_video_info(update: Update, context: ContextTypes.DEFAULT_TYPE):
+- البوت مخصص للتحميل من جميع المواقع
+- يمكنك التنزيل من مواقع متعددة بتنسيقات مختلفة
+- والإستماع إليها في أي وقت
+
+المواقع المدعومة:
+Youtube, Instagram, Facebook, Twitter, Tiktok, Snapchat, Soundcloud, Pinterest, Likee, Kwai
+
+ارسل الرابط فقط 👇"""
+    await update.message.reply_text(text)
+
+# استقبال الرابط
+async def handle_url(update: Update, context: ContextTypes.DEFAULT_TYPE):
     url = update.message.text
-
-    if "x.com" not in url and "twitter.com" not in url:
-        await update.message.reply_text("🚫 هذا الرابط غير مدعوم. ارسل رابط X فقط")
+    if not url.startswith("http"):
         return
 
-    msg = await update.message.reply_text("⏳ جاري استخراج الجودات المتاحة...")
+    msg = await update.message.reply_text("⏳ جارِ جلب محتوى X، يرجى الانتظار...")
 
     try:
-        with yt_dlp.YoutubeDL({'quiet': True}) as ydl:
-            info = ydl.extract_info(url, download=False)
+        # اهم حاجة عشان ما يجيبش اخطاء: نحدث الكوكيز ونجرب كل الصيغ
+        ydl_opts = {
+            'quiet': True,
+            'no_warnings': True,
+            'extract_flat': False,
+            'http_headers': {'User-Agent': 'Mozilla/5.0'},
+            'cookiefile': None,
+        }
 
-        # نخزن الرابط باسم المستخدم
-        user_links[update.message.chat_id] = url
-
-        # نجيب الجودات المتاحة ونشيل 1080
-        formats = []
-        for f in info.get('formats', []):
-            if f.get('height') and f.get('ext') == 'mp4':
-                h = f['height']
-                if h in [360, 480, 720]: # شلنا 1080
-                    size = f.get('filesize', 0) / 1024 / 1024
-                    formats.append([f"{h}p - {size:.1f}MB", str(f['format_id'])])
-
-        # لو ما لقينا شي نعطيه 360 اجباري
-        if not formats:
-            formats = [["360p", "best[height<=360]"]]
-
-        # نشيل التكرار
-        formats = list(dict.fromkeys([tuple(x) for x in formats]))
-
-        keyboard = [[InlineKeyboardButton(text, callback_data=data)] for text, data in formats[:5]] # 5 ازرار بس
-
-        await msg.edit_text(
-            f"🔍 لقينا {len(formats)} جودة للفيديو:\n{info.get('title', '')[:50]}",
-            reply_markup=InlineKeyboardMarkup(keyboard)
-        )
-
-    except Exception as e:
-        await msg.edit_text(f"🚫 صار خطأ: {e}")
-
-async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    query = update.callback_query
-    await query.answer()
-    await query.edit_message_text("⏳ جاري التحميل... 0%")
-
-    chat_id = query.message.chat_id
-    url = user_links.get(chat_id)
-    format_id = query.data
-
-    status_msg = await context.bot.send_message(chat_id, "📊 التحميل بدأ...")
-
-    def progress_hook(d):
-        if d['status'] == 'downloading':
-            p = d.get('_percent_str', '0%')
-            try:
-                context.bot.edit_message_text(chat_id=chat_id, message_id=status_msg.message_id, text=f"📊 جاري التحميل: {p}")
-            except: pass
-
-    ydl_opts = {
-        'format': format_id,
-        'outtmpl': '%(title).50s.%(ext)s',
-        'progress_hooks': [progress_hook],
-        'noplaylist': True,
-    }
-
-    try:
         with yt_dlp.YoutubeDL(ydl_opts) as ydl:
-            info = ydl.extract_info(url, download=True)
-            filename = ydl.prepare_filename(info)
+            info = await asyncio.to_thread(ydl.extract_info, url, download=False)
 
-        await status_msg.edit_text("📤 جاري الرفع...")
-        await context.bot.send_video(chat_id, video=open(filename, 'rb'), caption="✅ تم")
-        os.remove(filename)
-        await status_msg.delete()
+        title = info.get('title', 'فيديو')
+        duration = info.get('duration', 0)
+        dur_str = f"{duration//60}:{(duration%60):02d}" if duration else ""
+
+        # نجيب كل الجودات المتاحة
+        keyboard = []
+        formats = [f for f in info.get('formats', []) if f.get('vcodec')!= 'none']
+        formats = sorted(formats, key=lambda x: x.get('height', 0), reverse=True)[:4] # افضل 4 جودات
+
+        for f in formats:
+            height = f.get('height', '??')
+            btn = InlineKeyboardButton(f"الجودة {height}p ({dur_str}) 📹", callback_data=f"dl|{url}|{f['format_id']}")
+            keyboard.append([btn])
+
+        keyboard.append([InlineKeyboardButton("مشاهدة المنشور الاصلي", url=url)])
+        reply_markup = InlineKeyboardMarkup(keyboard)
+
+        await msg.edit_text(f"اختر جودة الفيديو رقم 1 ({dur_str}):\n{title[:100]}", reply_markup=reply_markup)
 
     except Exception as e:
-        await status_msg.edit_text(f"🚫 فشل التحميل: {e}")
+        await msg.edit_text(f"❌ حدث خطأ غير متوقع اثناء معالجة طلب X الخاص بك.\nجرب رابط اخر او بعد 5 دقائق")
 
-app = ApplicationBuilder().token(TOKEN).build()
-app.add_handler(CommandHandler("start", start))
-app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, get_video_info))
-app.add_handler(CallbackQueryHandler(button_handler))
-app.run_polling()
+# زر التحميل
+async def button(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    await query.answer("جاري التحميل...")
+    _, url, format_id = query.data.split("|")
+
+    await query.edit_message_text("⏳ تم استلام طلبك بنجاح!\nأنت الآن رقم 1 في قائمة الانتظار.\nسيتم إعلامك فور اكتمال التحميل.")
+
+    try:
+        ydl_opts = {
+            'format': format_id,
+            'outtmpl': 'downloads/%(id)s.%(ext)s',
+            'http_headers': {'User-Agent': 'Mozilla/5.0'},
+        }
+        with yt_dlp.YoutubeDL(ydl_opts) as ydl:
+            info = await asyncio.to_thread(ydl.extract_info, url, download=True)
+            file = ydl.prepare_filename(info)
+
+        caption = f"X - @{context.bot.username}\n{info.get('title','')}"
+        await context.bot.send_video(chat_id=query.message.chat_id, video=open(file, 'rb'), caption=caption)
+        os.remove(file)
+
+    except Exception as e:
+        await context.bot.send_message(chat_id=query.message.chat_id, text=f"❌ فشل التحميل. الرابط قد يكون خاص او محذوف")
+
+def main():
+    os.makedirs("downloads", exist_ok=True)
+    app = Application.builder().token(BOT_TOKEN).build()
+    app.add_handler(CommandHandler("start", start))
+    app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_url))
+    app.add_handler(CallbackQueryHandler(button))
+    print("Bot is running...")
+    app.run_polling()
+
+if __name__ == "__main__":
+    main()
